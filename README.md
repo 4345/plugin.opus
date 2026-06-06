@@ -3,7 +3,6 @@
                     Solar2D Opus Audio Plugin Documentation
 ==============================================================================
 Plugin Name:  plugin.opus
-Codec Version: Opus 1.6.1
 ------------------------------------------------------------------------------
 
 1. Overview
