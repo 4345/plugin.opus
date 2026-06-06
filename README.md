@@ -3,10 +3,7 @@
                     Solar2D Opus Audio Plugin Documentation
 ==============================================================================
 Plugin Name:  plugin.opus
-Publisher ID: ovh.azi
-Contact:      valandis@gmail.com
-Codec Version: Opus 1.6.1 (Latest Stable Release)
-URL:          https://azi.ovh
+Codec Version: Opus 1.6.1
 ------------------------------------------------------------------------------
 
 1. Overview
