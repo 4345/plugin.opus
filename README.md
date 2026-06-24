@@ -17,7 +17,8 @@ The Solar2D Opus Plugin is a high-performance, lightweight native audio codec pl
   * **Android:** Packaged as a Java JAR wrapping a compiled JNI native dynamic library (`.so`) for `armeabi-v7a` and `arm64-v8a` architectures.
   * **iOS / iOS Simulator:** Distributed as a static library (`libplugin_opus.a`). Links statically with the target application binary during the Solar2D cloud build process.
   * **Windows Simulator:** Full native C++ implementation (`plugin_opus.dll`) compiled with the Opus 1.6.1 codec to enable full encoding/decoding capabilities on Windows desktop.
-  * **macOS & Linux Simulators:** Pure Lua stub implementation (`plugin_opus.lua`) to prevent simulator crashes and support clean UI flow testing.
+  * **macOS Simulator & Desktop:** Full native C++ implementation (`plugin_opus.dylib`) compiled with the Opus 1.6.1 codec as a universal binary (`arm64` and `x86_64`) to enable full native encoding/decoding, resampling, and volume normalization.
+  * **Linux Simulator:** Pure Lua stub implementation (`plugin_opus.lua`) to prevent simulator crashes and support clean UI flow testing.
 
 * **Statically Linked Codec**
   For Android, iOS, and Windows, instead of using a separate C/C++ library, the Opus codec is statically compiled and linked directly into the native wrapper library. This enables compiler/linker dead-code stripping, reducing the final binary footprint under 1MB (e.g. ~459KB for iOS device, ~680KB for Android arm64-v8a, and ~302KB for Windows Simulator DLL).
@@ -25,11 +26,11 @@ The Solar2D Opus Plugin is a high-performance, lightweight native audio codec pl
 * **Fixed-Point Math Compilation**
   Compiled with the `OPUS_FIXED_POINT=ON` flag. This configures the entire Opus codec to use integer-based, fixed-point calculations instead of floating-point math. This is optimal for mobile processors (ARM) and desktop simulators, resulting in significantly reduced CPU overhead.
 
-* **Native Volume Normalizer (Android & Windows Simulator)**
-  On Android and Windows Simulator, the plugin includes a built-in volume peak normalizer running directly in the native C++ layer. It scans the PCM input, calculates the peak amplitude, and applies a scaling factor up to the target ratio (e.g., 95% peak volume) in a single pass. This boosts quiet recordings from low-end microphones without digital clipping. (Bypassed on iOS, macOS, and Linux as `opus.normalize` is nil).
+* **Native Volume Normalizer (Android, macOS & Windows Simulator)**
+  On Android, macOS, and Windows Simulator, the plugin includes a built-in volume peak normalizer running directly in the native C++ layer. It scans the PCM input, calculates the peak amplitude, and applies a scaling factor up to the target ratio (e.g., 95% peak volume) in a single pass. This boosts quiet recordings from low-end microphones without digital clipping. (Bypassed on iOS and Linux as `opus.normalize` is nil).
 
-* **Native Linear Resampler (Android & Windows Simulator)**
-  On Android and Windows Simulator, the plugin includes a native resampler written in C++. Since mobile and desktop devices might record audio at various hardware sample rates (e.g. 44100 Hz), while Opus strictly requires specific target sample rates (8000, 12000, 16000, 24000, or 48000 Hz), the resampler bridges this difference directly in C++. On iOS, Solar2D records audio natively at the target rate specified in Lua (e.g. 16000 Hz), which is directly supported by the Opus codec. Thus, native resampling is bypassed on iOS, macOS, and Linux (the native `opus.resample` is nil).
+* **Native Linear Resampler (Android, macOS & Windows Simulator)**
+  On Android, macOS, and Windows Simulator, the plugin includes a native resampler written in C++. Since mobile and desktop devices might record audio at various hardware sample rates (e.g. 44100 Hz), while Opus strictly requires specific target sample rates (8000, 12000, 16000, 24000, or 48000 Hz), the resampler bridges this difference directly in C++. On iOS, Solar2D records audio natively at the target rate specified in Lua (e.g. 16000 Hz), which is directly supported by the Opus codec. Thus, native resampling is bypassed on iOS and Linux (the native `opus.resample` is nil).
 
 ---
 
@@ -79,21 +80,21 @@ Creates and returns a native Opus decoder instance.
   Destroys the decoder and frees its native memory pool.
   * *Note:* Optional on iOS (cleanup is handled automatically by Lua's Garbage Collector). Explicitly releases resources on Android and Windows.
 
-### `opus.resample(pcmBytesString, fromRate, toRate, channels)` [Android & Windows Simulator]
+### `opus.resample(pcmBytesString, fromRate, toRate, channels)` [Android, macOS & Windows Simulator]
 Natively resamples raw PCM bytes from one sample rate to another.
 * **pcmBytesString:** Raw 16-bit PCM bytes.
 * **fromRate:** Source frequency in Hz.
 * **toRate:** Target frequency in Hz.
 * **channels:** Number of channels.
 * **Returns:** Resampled PCM bytes (binary string).
-* *Note:* This function is `nil` on iOS, macOS, and Linux simulators.
+* *Note:* This function is `nil` on iOS and Linux simulators.
 
-### `opus.normalize(pcmBytesString, targetRatio)` [Android & Windows Simulator]
+### `opus.normalize(pcmBytesString, targetRatio)` [Android, macOS & Windows Simulator]
 Natively boosts the peak volume level of the audio.
 * **pcmBytesString:** Raw 16-bit PCM bytes.
 * **targetRatio:** Target peak amplitude ratio (e.g., 0.95 for 95% maximum volume).
 * **Returns:** Normalized PCM bytes (binary string).
-* *Note:* This function is `nil` on iOS, macOS, and Linux simulators.
+* *Note:* This function is `nil` on iOS and Linux simulators.
 
 ---
 
@@ -102,10 +103,10 @@ Natively boosts the peak volume level of the audio.
 For a standard voice message recording/playback feature:
 1. **Record audio:**
    * On Android and Windows: WAV format at 44100 Hz (fixed rate).
-   * On iOS: AIFF format at 16000 Hz (configurable native rate).
+   * On iOS and macOS: AIFF format at 16000 Hz (configurable native rate).
 2. Read the audio file, extract the raw PCM chunk.
 3. **Handle resampling:**
-   * On Android and Windows, resample the PCM to 16000 Hz natively using `opus.resample`.
+   * On Android, macOS, and Windows, resample the PCM to 16000 Hz natively using `opus.resample` (or skip if already recorded at target rate).
    * On iOS, the PCM is already at 16000 Hz, so resampling is skipped.
 4. **Boost volume to comfortable listening level:**
    * On Android and Windows, use `opus.normalize` (target peak 95%).
