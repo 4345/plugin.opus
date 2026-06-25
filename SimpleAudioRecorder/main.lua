@@ -24,10 +24,8 @@ local centerY = display.contentCenterY
 local _W = display.contentWidth
 local _H = display.contentHeight
 
--- iOS 5 -only workaround for known Apple bug (Bug ID:9948362 and 10508829)
-local platVersion = system.getInfo( "platformVersion" )
-platVersion = string.sub( platVersion, 1, 1 )
-if system.getInfo( "platformName" ) == "iPhone OS" and platVersion == "5" then
+-- Настройка аудиосессии iOS для одновременной записи и воспроизведения (без задержек при переключении)
+if system.getInfo( "platformName" ) == "iPhone OS" then
 	if audio.supportsSessionProperty then
 	    audio.setSessionProperty(audio.MixMode, audio.PlayAndRecordMixMode)
 	end
