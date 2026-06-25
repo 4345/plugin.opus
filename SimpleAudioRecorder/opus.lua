@@ -1,11 +1,57 @@
 -- opus.lua
--- Повторно используемый модуль Solar2D для транскодирования Opus-1.6.1, обнаружения
--- голосовой активности (VAD) и удаления тишины (файлы AIFF/WAV)
+-- Reusable Solar2D module for Opus-1.6.1 transcoding (WAV and AIFF files)
+--
+-- ==============================================================================
+-- PLUGIN DETAILS & PLATFORM CAPABILITIES:
+-- ==============================================================================
+-- * Codec version: Opus 1.6.1 (published as plugin.opus)
+-- * Fixed-Point Math: Compiled with OPUS_FIXED_POINT=ON for high performance and
+--   low power consumption on mobile CPUs (Android & iOS).
+--
+-- [Android Target]
+-- * Format: Java JAR wrapping a compiled JNI native dynamic library (.so).
+-- * Static Linkage: Links libopus.a statically into the JNI library to enable
+--   dead-code stripping, minimizing the plugin package footprint.
+-- * Native Volume Normalizer: Includes a custom JNI peak normalizer to boost
+--   audio levels (target peak 95%) without introducing digital clipping.
+-- * Native JNI Resampler: Fast linear resampler to bridge Android's fixed
+--   44100 Hz recording rate to standard Opus-supported rates (8kHz to 48kHz).
+--
+-- [iOS / iOS Simulator Targets]
+-- * Format: Universal static library (libplugin_opus.a) linked at cloud build time.
+-- * Static Linkage: Fully statically linked with native dead-code stripping,
+--   keeping the device static library size down to ~459 KB.
+-- * Recording & Rates: Bypasses native resampling/normalizing. On iOS, Solar2D
+--   records audio directly at the requested target rate (e.g. 16000 Hz), which
+--   is natively supported by the Opus codec.
+--
+-- [Desktop Simulator Targets (macOS, Windows, Linux)]
+-- * Format: Pure Lua stubs to prevent simulator crashes and support clean UI testing.
+-- ==============================================================================
+-- API USAGE EXAMPLE:
+-- ==============================================================================
+-- local opusModule = require("opus")
+-- 
+-- -- 1. Encode a recorded WAV/AIFF file into custom .opus package
+-- local targetRate = 16000 -- Hz (8000, 12000, 16000, 24000, 48000 supported)
+-- local encoded, encErr = opusModule.encodeFile(srcAudioPath, destOpusPath, targetRate)
+-- if not encoded then
+--     print("Encoding failed: " .. tostring(encErr))
+-- end
+-- 
+-- -- 2. Decode the custom .opus package back to original WAV/AIFF format
+-- local decoded, decErr = opusModule.decodeFile(destOpusPath, decodedAudioPath)
+-- if not decoded then
+--     print("Decoding failed: " .. tostring(decErr))
+-- end
+-- ==============================================================================
 
-local dll = require("dll")
 local M = {}
 
--- Вспомогательные функции для чтения бинарных данных
+-- ==============================================================================
+-- BINARY PARSING HELPERS (WAV/AIFF Support)
+-- ==============================================================================
+
 local function readBigEndianInt32(str, pos)
     local b1 = string.byte(str, pos)
     local b2 = string.byte(str, pos + 1)
@@ -48,7 +94,10 @@ local function readExtendedFloat(str, pos)
     return math.floor(val * math.pow(2, exponent) + 0.5)
 end
 
--- Вспомогательные функции для записи бинарных данных
+-- ==============================================================================
+-- BINARY WRITING HELPERS
+-- ==============================================================================
+
 local function writeBigEndianInt32(val)
     local b1 = math.floor(val / 16777216) % 256
     local b2 = math.floor(val / 65536) % 256
@@ -71,26 +120,7 @@ local function writeLittleEndianInt16(val)
     return string.char(b1, b2)
 end
 
--- Вспомогательная функция для создания заголовка WAVE (WAV, PCM 16-bit)
-local function makeWavHeader(sampleRate, channels, pcmSize)
-    local header = {}
-    header[#header + 1] = "RIFF"
-    header[#header + 1] = writeLittleEndianInt32(36 + pcmSize)
-    header[#header + 1] = "WAVE"
-    header[#header + 1] = "fmt "
-    header[#header + 1] = writeLittleEndianInt32(16)
-    header[#header + 1] = writeLittleEndianInt16(1) -- PCM format (1)
-    header[#header + 1] = writeLittleEndianInt16(channels)
-    header[#header + 1] = writeLittleEndianInt32(sampleRate)
-    header[#header + 1] = writeLittleEndianInt32(sampleRate * channels * 2)
-    header[#header + 1] = writeLittleEndianInt16(channels * 2)
-    header[#header + 1] = writeLittleEndianInt16(16) -- bits per sample (16)
-    header[#header + 1] = "data"
-    header[#header + 1] = writeLittleEndianInt32(pcmSize)
-    return table.concat(header)
-end
-
--- Перестановка байтов для конвертации между big-endian (AIFF) и little-endian (Opus/WAV)
+-- Swaps byte ordering to convert between big-endian (AIFF) and little-endian (WAV/Opus)
 local function swapBytes(pcmString)
     local len = #pcmString
     local chars = {}
@@ -103,95 +133,18 @@ local function swapBytes(pcmString)
     return table.concat(chars)
 end
 
--- Обнаружение голосовой активности (VAD) и удаление тишины с использованием буферов предварительной (pre-roll) и последующей (post-roll) задержки
-local function stripSilence(pcmBytes, bytesPerFrame, frameSize, channels)
-    local speechFrames = {}
-    local threshold = 400 -- Порог среднеквадратичной амплитуды (RMS) (можно настраивать)
-    local originalFrames = 0
-    local speechFramesCount = 0
-    
-    -- Настройка "зависания" (буфера тишины) для предотвращения прерывистого звука/клиппинга
-    local preRollLimit = 6   -- Сохранять 6 фреймов (120 мс) тишины ДО начала речи
-    local postRollLimit = 15 -- Сохранять 15 фреймов (300 мс) тишины ПОСЛЕ окончания речи
-    
-    local preRollBuffer = {}  -- Кольцевой буфер для предварительной тишины (pre-roll)
-    local postRollCounter = 0 -- Счетчик последующей тишины (post-roll)
-    local inSpeech = false
-    
-    for i = 1, #pcmBytes, bytesPerFrame do
-        local chunk = pcmBytes:sub(i, i + bytesPerFrame - 1)
-        if #chunk == bytesPerFrame then
-            originalFrames = originalFrames + 1
-            local sumSqr = 0
-            local numSamples = frameSize * channels
-            for j = 1, #chunk, 2 do
-                local low = chunk:byte(j)
-                local high = chunk:byte(j + 1)
-                if not low or not high then break end
-                local sample = low + high * 256
-                if sample >= 32768 then sample = sample - 65536 end
-                sumSqr = sumSqr + (sample * sample)
-            end
-            local rms = math.sqrt(sumSqr / numSamples)
-            
-            local isSpeechFrame = (rms > threshold)
-            
-            if isSpeechFrame then
-                if not inSpeech then
-                    -- Переход от тишины к речи. Сначала сбрасываем буфер pre-roll.
-                    for k = 1, #preRollBuffer do
-                        speechFrames[#speechFrames + 1] = preRollBuffer[k]
-                        speechFramesCount = speechFramesCount + 1
-                    end
-                    preRollBuffer = {}
-                    inSpeech = true
-                end
-                
-                -- Добавляем фрейм речи
-                speechFrames[#speechFrames + 1] = chunk
-                speechFramesCount = speechFramesCount + 1
-                
-                -- Поддерживаем активным окно задержки post-roll
-                postRollCounter = postRollLimit
-            else
-                -- Фрейм тишины
-                if inSpeech then
-                    if postRollCounter > 0 then
-                        -- В пределах окна задержки сохраняем фрейм тишины
-                        speechFrames[#speechFrames + 1] = chunk
-                        speechFramesCount = speechFramesCount + 1
-                        postRollCounter = postRollCounter - 1
-                    else
-                        -- Окно задержки истекло, переход в состояние тишины
-                        inSpeech = false
-                        preRollBuffer[#preRollBuffer + 1] = chunk
-                    end
-                else
-                    -- В состоянии тишины. Добавляем в кольцевой буфер pre-roll.
-                    preRollBuffer[#preRollBuffer + 1] = chunk
-                    if #preRollBuffer > preRollLimit then
-                        table.remove(preRollBuffer, 1) -- Поддерживаем фиксированный размер
-                    end
-                end
-            end
-        end
-    end
-    
-    return table.concat(speechFrames), originalFrames, speechFramesCount
-end
-
 -- ==============================================================================
--- API ДЛЯ КОДИРОВАНИЯ ФАЙЛА
+-- ENCODE FILE API
 -- ==============================================================================
--- Читает аудиоданные WAV/AIFF из inputFilePath, нормализует и ресемплирует их с помощью
--- встроенной библиотеки, удаляет тишину, сжимает во фреймы Opus и записывает в outputOpusPath
--- в пользовательском независимом бинарном формате, содержащем все заголовки и метаданные файла.
+-- Reads WAV/AIFF audio from inputFilePath, normalizes and resamples using the
+-- native library, compresses to Opus frames, and writes to outputOpusPath in
+-- a custom self-contained binary format containing all file headers and metadata.
 -- ==============================================================================
 function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
     local f = io.open(inputFilePath, "rb")
     if not f then
-        dll.llog("Ошибка: не удалось открыть входной аудиофайл: " .. tostring(inputFilePath))
-        return nil, "Не удалось открыть входной файл"
+        print("Error: Could not open input audio file: " .. tostring(inputFilePath))
+        return nil, "Could not open input file"
     end
     local content = f:read("*a")
     f:close()
@@ -200,7 +153,7 @@ function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
     local rawPcm, sampleRate, channels, soundDataOffset, soundDataSize
     local isBigEndian = false
     
-    -- Смещение байтов в заголовках для перезаписи размеров при декодировании
+    -- Byte offset references in headers to rewrite sizes on decoding
     local commNumFramesOffset = nil
     local ssndChunkSizeOffset = nil
     local dataChunkSizeOffset = nil
@@ -257,29 +210,27 @@ function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
     end
 
     if not soundDataOffset or not soundDataSize or not sampleRate or not channels then
-        return nil, "Не удалось разобрать заголовки аудио WAV/AIFF"
+        return nil, "Failed to parse WAV/AIFF audio headers"
     end
 
     rawPcm = content:sub(soundDataOffset, soundDataOffset + soundDataSize - 1)
 
-    dll.llog("\n==========================================")
-    dll.llog("      КОНВЕЙЕР КОДИРОВАНИЯ OPUS")
-    dll.llog("==========================================")
-    dll.llog("Свойства исходного аудио:")
-    dll.llog("  Формат: " .. (fileType == "FORM" and "AIFF" or "WAV"))
-    dll.llog("  Частота дискретизации: " .. sampleRate .. " Гц")
-    dll.llog("  Каналы: " .. channels)
-    dll.llog("  Исходный размер: " .. #rawPcm .. " байт PCM")
+    print("\n==========================================")
+    print("      OPUS NATIVE ENCODING PIPELINE")
+    print("==========================================")
+    print("Source Audio Properties:")
+    print("  Format: " .. (fileType == "FORM" and "AIFF" or "WAV"))
+    print("  Sample Rate: " .. sampleRate .. " Hz")
+    print("  Channels: " .. channels)
+    print("  Original Size: " .. #rawPcm .. " PCM bytes")
 
     local opus = require "plugin.opus"
     local hasResample = (opus.resample ~= nil)
-    dll.llog("  Встроенный ресемплер: " .. tostring(hasResample))
-    dll.llog("  Встроенный нормализатор: " .. tostring(opus.normalize ~= nil))
 
-    -- Определение корректной целевой частоты, поддерживаемой кодеком Opus
+    -- Determine valid target rate supported by the Opus codec
     local workingSampleRate = targetSampleRate or sampleRate
     if workingSampleRate ~= 8000 and workingSampleRate ~= 12000 and workingSampleRate ~= 16000 and workingSampleRate ~= 24000 and workingSampleRate ~= 48000 then
-        -- Возврат к ближайшей поддерживаемой частоте кодека
+        -- Fallback to the closest supported codec rate
         if workingSampleRate < 10000 then workingSampleRate = 8000
         elseif workingSampleRate < 14000 then workingSampleRate = 12000
         elseif workingSampleRate < 20000 then workingSampleRate = 16000
@@ -287,74 +238,61 @@ function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
         else workingSampleRate = 48000 end
     end
 
-    -- Изменение порядка байтов (endianness), если файл Big-Endian (AIFF)
+    -- Swap endianness if file is Big-Endian (AIFF)
     local inputPcm = rawPcm
     if isBigEndian then
         inputPcm = swapBytes(rawPcm)
     end
 
-    -- Выполнение ресемплирования средствами JNI, если частоты различаются
+    -- Perform native JNI resampling if rates differ
     local pcmForOpus = inputPcm
     if sampleRate ~= workingSampleRate then
         if hasResample then
-            dll.llog("Ресемплирование исходного PCM с " .. sampleRate .. " Гц до " .. workingSampleRate .. " Гц...")
+            print("Resampling source PCM natively from " .. sampleRate .. " Hz to " .. workingSampleRate .. " Hz...")
             pcmForOpus = opus.resample(inputPcm, sampleRate, workingSampleRate, channels)
         else
-            dll.llog("Предупреждение: встроенный ресемплер недоступен, используется исходная частота: " .. sampleRate .. " Гц.")
+            print("Warning: Native resampler not available, using source sample rate: " .. sampleRate .. " Hz.")
             workingSampleRate = sampleRate
         end
     end
 
-    -- Выполнение нормализации громкости средствами JNI (целевой пик 95% уровня громкости)
+    -- Perform native JNI volume normalization (target peak 95% volume level)
     if opus.normalize ~= nil then
-        dll.llog("Нормализация пиковой громкости до 95%...")
+        print("Normalizing peak volume level natively to 95%...")
         pcmForOpus = opus.normalize(pcmForOpus, 0.95)
     end
 
-    -- Проверка поддержки рабочей частоты дискретизации кодеком Opus
+    -- Check if working sample rate is supported by Opus
     if workingSampleRate ~= 8000 and workingSampleRate ~= 12000 and workingSampleRate ~= 16000 and workingSampleRate ~= 24000 and workingSampleRate ~= 48000 then
-        return nil, "Неподдерживаемая рабочая частота дискретизации: " .. workingSampleRate .. " Гц"
+        return nil, "Unsupported working sample rate: " .. workingSampleRate .. " Hz"
     end
 
-    local frameSize = math.floor(workingSampleRate * 0.02) -- фрейм аудио 20 мс
+    local frameSize = math.floor(workingSampleRate * 0.02) -- 20ms audio frame
     local bytesPerFrame = frameSize * channels * 2
 
-    -- Удаление тишины из PCM
-    dll.llog("Обнаружение и удаление периодов тишины...")
-    local activePcm, totalFrames, speechFrames = stripSilence(pcmForOpus, bytesPerFrame, frameSize, channels)
-    local silenceFrames = totalFrames - speechFrames
-    dll.llog("  Всего фреймов (по 20мс): " .. totalFrames)
-    dll.llog("  Сохранено фреймов с речью: " .. speechFrames .. " (" .. string.format("%.1f", speechFrames / totalFrames * 100) .. "%)")
-    dll.llog("  Удалено фреймов с тишиной: " .. silenceFrames .. " (" .. string.format("%.1f", silenceFrames / totalFrames * 100) .. "%)")
-    dll.llog("  Размер отфильтрованного PCM: " .. #activePcm .. " байт")
-
-    if #activePcm == 0 then
-        return nil, "Recorded audio is entirely silent"
-    end
-
-    -- Создание встроенного кодера Opus (режим VOIP = 2048)
+    -- Create native Opus encoder (VOIP mode = 2048)
     local encoder, err = opus.encoder_create(workingSampleRate, channels, 2048)
     if not encoder then
-        return nil, "Не удалось создать встроенный кодер: " .. tostring(err)
+        return nil, "Failed to create native encoder: " .. tostring(err)
     end
     
-    -- Отключение стандартного DTX для обеспечения стабильного вывода потока кодека
+    -- Keep standard DTX disabled to ensure stable codec stream output
     encoder:set_dtx(false)
 
     local compressedData = {}
     local totalCompressedSize = 0
 
-    dll.llog("Кодирование фреймов PCM в Opus...")
-    for i = 1, #activePcm, bytesPerFrame do
-        local chunk = activePcm:sub(i, i + bytesPerFrame - 1)
+    print("Encoding PCM frames to Opus...")
+    for i = 1, #pcmForOpus, bytesPerFrame do
+        local chunk = pcmForOpus:sub(i, i + bytesPerFrame - 1)
         if #chunk < bytesPerFrame then
-            -- Дополнение нулями хвостового неполного субфрейма
+            -- Zero-pad trailing sub-frame
             chunk = chunk .. string.rep(string.char(0), bytesPerFrame - #chunk)
         end
         local packet, encErr = encoder:encode(chunk, frameSize)
         if not packet then
             if encoder.destroy then encoder:destroy() end
-            return nil, "Ошибка кодирования на байте " .. i .. ": " .. tostring(encErr)
+            return nil, "Encoding error at byte " .. i .. ": " .. tostring(encErr)
         end
         compressedData[#compressedData + 1] = packet
         totalCompressedSize = totalCompressedSize + #packet
@@ -362,23 +300,23 @@ function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
 
     if encoder.destroy then encoder:destroy() end
 
-    dll.llog("  Размер сжатого Opus: " .. totalCompressedSize .. " байт")
+    print("  Compressed Opus Size: " .. totalCompressedSize .. " bytes")
     local compRatio = #pcmForOpus / totalCompressedSize
-    dll.llog("  Коэффициент сжатия: " .. string.format("%.2f", compRatio) .. "x")
+    print("  Compression Ratio: " .. string.format("%.2f", compRatio) .. "x")
 
-    -- Извлечение оригинального заголовка для точного сохранения форматирования WAV/AIFF
+    -- Expose original header for exact WAV/AIFF formatting preservation
     local newHeader = content:sub(1, soundDataOffset - 1)
 
-    -- Запись упакованных данных в пользовательский контейнер файлов .opus
+    -- Write packaged data to the custom .opus file container
     local out, ioErr = io.open(outputOpusPath, "wb")
     if not out then
-        return nil, "Не удалось открыть выходной файл Opus: " .. tostring(ioErr)
+        return nil, "Failed to open Opus output file: " .. tostring(ioErr)
     end
 
-    -- Заголовок контейнера:
-    -- Magic (4 байта) | Формат (4 байта) | Исходная частота (4 байта) | Каналы (2 байта) | Рабочая частота (2 байта)
-    -- CommOffset (4 байта) | SsndOffset (4 байта) | DataOffset (4 байта)
-    -- Размер заголовка (4 байта) | Оригинальный заголовок (H байт) | Количество пакетов (4 байта)
+    -- Container Header:
+    -- Magic (4 bytes) | Format (4 bytes) | SrcRate (4 bytes) | Channels (2 bytes) | WorkingRate (2 bytes)
+    -- CommOffset (4 bytes) | SsndOffset (4 bytes) | DataOffset (4 bytes)
+    -- HeaderSize (4 bytes) | OriginalHeader (H bytes) | PacketCount (4 bytes)
     out:write("OPUS")
     out:write(fileType == "FORM" and "AIFF" or "WAVE")
     out:write(writeLittleEndianInt32(sampleRate))
@@ -393,7 +331,7 @@ function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
     out:write(newHeader)
     out:write(writeLittleEndianInt32(#compressedData))
 
-    -- Полезная нагрузка пакетов
+    -- Packets payload
     for i = 1, #compressedData do
         local packet = compressedData[i]
         out:write(writeLittleEndianInt32(#packet))
@@ -401,32 +339,32 @@ function M.encodeFile(inputFilePath, outputOpusPath, targetSampleRate)
     end
     out:close()
 
-    dll.llog("Аудиофайл успешно закодирован и упакован в: " .. outputOpusPath)
-    dll.llog("==========================================\n")
+    print("Audio file successfully encoded & packaged to: " .. outputOpusPath)
+    print("==========================================\n")
     return true
 end
 
 -- ==============================================================================
--- API ДЛЯ ДЕКОДИРОВАНИЯ ФАЙЛА
+-- DECODE FILE API
 -- ==============================================================================
--- Читает упакованный файл .opus из inputOpusPath, декодирует пакеты обратно в PCM,
--- ресемплирует обратно до исходной частоты дискретизации и записывает обновленный WAV/AIFF файл.
+-- Reads custom .opus packaged file from inputOpusPath, decodes the packets back
+-- to PCM, resamples back to original sampleRate, and writes updated WAV/AIFF file.
 -- ==============================================================================
 function M.decodeFile(inputOpusPath, outputFilePath)
     local f, ioErr = io.open(inputOpusPath, "rb")
     if not f then
-        dll.llog("Ошибка: не удалось открыть входной файл Opus: " .. tostring(inputOpusPath))
-        return nil, "Не удалось открыть входной файл: " .. tostring(ioErr)
+        print("Error: Could not open input Opus file: " .. tostring(inputOpusPath))
+        return nil, "Could not open input file: " .. tostring(ioErr)
     end
 
-    -- Чтение и проверка полей заголовка контейнера
+    -- Read and verify container header fields
     local magic = f:read(4)
     if magic ~= "OPUS" then
         f:close()
-        return nil, "Неверный идентификатор формата файла (ожидался 'OPUS')"
+        return nil, "Invalid file format identifier (expected 'OPUS')"
     end
 
-    local formatType = f:read(4) -- "AIFF" или "WAVE"
+    local formatType = f:read(4) -- "AIFF" or "WAVE"
     
     local headerBytes = f:read(4)
     local sampleRate = readLittleEndianInt32(headerBytes, 1)
@@ -437,7 +375,7 @@ function M.decodeFile(inputOpusPath, outputFilePath)
     local workingRateBytes = f:read(2)
     local workingSampleRate = readLittleEndianInt16(workingRateBytes, 1)
     
-    -- Загрузка байтовых смещений для перезаписи размеров заголовков
+    -- Load byte offsets for header size rewriting
     local commNumFramesOffsetVal = readLittleEndianInt32(f:read(4), 1)
     local ssndChunkSizeOffsetVal = readLittleEndianInt32(f:read(4), 1)
     local dataChunkSizeOffsetVal = readLittleEndianInt32(f:read(4), 1)
@@ -453,7 +391,7 @@ function M.decodeFile(inputOpusPath, outputFilePath)
     local packetCountBytes = f:read(4)
     local packetCount = readLittleEndianInt32(packetCountBytes, 1)
 
-    -- Извлечение пакетов
+    -- Extract packets
     local compressedData = {}
     for i = 1, packetCount do
         local lenBytes = f:read(4)
@@ -464,35 +402,35 @@ function M.decodeFile(inputOpusPath, outputFilePath)
     end
     f:close()
 
-    dll.llog("\n==========================================")
-    dll.llog("      КОНВЕЙЕР ДЕКОДИРОВАНИЯ OPUS")
-    --dll.llog("==========================================")
-    --dll.llog("Свойства пакета Opus:")
-    --dll.llog("  Целевой формат: " .. formatType)
-    --dll.llog("  Исходная частота дискретизации: " .. sampleRate .. " Гц")
-    --dll.llog("  Рабочая частота дискретизации: " .. workingSampleRate .. " Гц")
-    --dll.llog("  Каналы: " .. channels)
-    --dll.llog("  Всего пакетов: " .. #compressedData)
+    print("\n==========================================")
+    print("      OPUS NATIVE DECODING PIPELINE")
+    print("==========================================")
+    print("Opus Package Properties:")
+    print("  Target Format: " .. formatType)
+    print("  Original Sample Rate: " .. sampleRate .. " Hz")
+    print("  Working Sample Rate: " .. workingSampleRate .. " Hz")
+    print("  Channels: " .. channels)
+    print("  Total Packets: " .. #compressedData)
 
     local opus = require "plugin.opus"
     local hasResample = (opus.resample ~= nil)
 
-    -- Создание встроенного декодера Opus
+    -- Create native Opus decoder
     local decoder, err = opus.decoder_create(workingSampleRate, channels)
     if not decoder then
-        return nil, "Не удалось создать встроенный декодер: " .. tostring(err)
+        return nil, "Failed to create native decoder: " .. tostring(err)
     end
 
-    local frameSize = math.floor(workingSampleRate * 0.02) -- размер фрейма 20 мс
+    local frameSize = math.floor(workingSampleRate * 0.02) -- 20ms frame size
     local decodedPcmList = {}
 
-    -- dll.llog("Декодирование пакетов Opus...")
+    print("Decoding Opus packets...")
     for i = 1, #compressedData do
         local packet = compressedData[i]
         local pcmFrame, decErr = decoder:decode(packet, frameSize)
         if not pcmFrame then
             if decoder.destroy then decoder:destroy() end
-            return nil, "Ошибка декодирования на пакете " .. i .. ": " .. tostring(decErr)
+            return nil, "Decoding error at packet " .. i .. ": " .. tostring(decErr)
         end
         decodedPcmList[#decodedPcmList + 1] = pcmFrame
     end
@@ -500,33 +438,83 @@ function M.decodeFile(inputOpusPath, outputFilePath)
     if decoder.destroy then decoder:destroy() end
 
     local decodedPcm = table.concat(decodedPcmList)
-    dll.llog("  Исходный размер декодированного PCM: " .. #decodedPcm .. " байт")
+    print("  Decoded PCM Raw Size: " .. #decodedPcm .. " bytes")
 
-    -- Ресемплирование PCM обратно до исходной частоты sampleRate, если они различались
+    -- Resample PCM back to original sampleRate if they differed
     if sampleRate ~= workingSampleRate then
         if hasResample then
-            -- dll.llog("Ресемплирование декодированного PCM с " .. workingSampleRate .. " Гц обратно до " .. sampleRate .. " Гц...")
+            print("Resampling decoded PCM natively from " .. workingSampleRate .. " Hz back to " .. sampleRate .. " Hz...")
             decodedPcm = opus.resample(decodedPcm, workingSampleRate, sampleRate, channels)
-            dll.llog("  Размер ресемплированного PCM: " .. #decodedPcm .. " байт")
+            print("  Resampled PCM Size: " .. #decodedPcm .. " bytes")
         end
     end
 
-    -- Мы ВСЕГДА реконструируем декодированный файл как WAVE (WAV),
-    -- так как этот формат поддерживается нативно на всех платформах (iOS, Android, macOS, Windows).
-    -- Данные decodedPcm от Opus декодера уже находятся в little-endian (для WAV), поэтому байты не переставляем.
-    local wavHeader = makeWavHeader(sampleRate, channels, #decodedPcm)
-    local updatedContent = wavHeader .. decodedPcm
+    -- Convert back to Big-Endian if target file format is AIFF
+    local isBigEndian = (formatType == "AIFF")
+    if isBigEndian then
+        decodedPcm = swapBytes(decodedPcm)
+    end
 
-    -- Запись реконструированного файла в outputFilePath
+    -- Update WAV/AIFF header chunk sizes to match the decoded PCM size
+    local updatedContent
+    if formatType == "AIFF" then
+        local totalSize = #newHeader + #decodedPcm
+        
+        -- 1. Update FORM chunk size (offset 5)
+        local p1 = newHeader:sub(1, 4)
+        local p2 = writeBigEndianInt32(totalSize - 8)
+        local p3 = newHeader:sub(9)
+        newHeader = p1 .. p2 .. p3
+        
+        -- 2. Update COMM chunk frame count
+        if commNumFramesOffset then
+            local numFrames = #decodedPcm / (channels * 2)
+            p1 = newHeader:sub(1, commNumFramesOffset - 1)
+            p2 = writeBigEndianInt32(numFrames)
+            p3 = newHeader:sub(commNumFramesOffset + 4)
+            newHeader = p1 .. p2 .. p3
+        end
+        
+        -- 3. Update SSND chunk size
+        if ssndChunkSizeOffset then
+            p1 = newHeader:sub(1, ssndChunkSizeOffset - 1)
+            p2 = writeBigEndianInt32(#decodedPcm + 8)
+            p3 = newHeader:sub(ssndChunkSizeOffset + 4)
+            newHeader = p1 .. p2 .. p3
+        end
+        
+        updatedContent = newHeader .. decodedPcm
+    else
+        -- WAV
+        local totalSize = #newHeader + #decodedPcm
+        
+        -- 1. Update RIFF chunk size (offset 5)
+        local p1 = newHeader:sub(1, 4)
+        local p2 = writeLittleEndianInt32(totalSize - 8)
+        local p3 = newHeader:sub(9)
+        newHeader = p1 .. p2 .. p3
+        
+        -- 2. Update data chunk size
+        if dataChunkSizeOffset then
+            p1 = newHeader:sub(1, dataChunkSizeOffset - 1)
+            p2 = writeLittleEndianInt32(#decodedPcm)
+            p3 = newHeader:sub(dataChunkSizeOffset + 4)
+            newHeader = p1 .. p2 .. p3
+        end
+        
+        updatedContent = newHeader .. decodedPcm
+    end
+
+    -- Write reconstructed file to outputFilePath
     local out, writeErr = io.open(outputFilePath, "wb")
     if not out then
-        return nil, "Не удалось открыть выходной файл для записи: " .. tostring(writeErr)
+        return nil, "Failed to open output file for writing: " .. tostring(writeErr)
     end
     out:write(updatedContent)
     out:close()
 
-    dll.llog("Аудиофайл успешно реконструирован и записан в: " .. outputFilePath)
-    dll.llog("==========================================\n")
+    print("Audio file successfully reconstructed & written to: " .. outputFilePath)
+    print("==========================================\n")
     return true
 end
 
