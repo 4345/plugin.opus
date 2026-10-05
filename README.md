@@ -14,23 +14,23 @@ The Solar2D Opus Plugin is a high-performance, lightweight native audio codec pl
 ## 2. Design Decisions & Implementation Highlights
 
 * **Platform-Specific Architectures & Formats**
-  * **Android:** Packaged as a Java JAR wrapping a compiled JNI native dynamic library (`.so`) for `armeabi-v7a` and `arm64-v8a` architectures.
-  * **iOS / iOS Simulator:** Distributed as a static library (`libplugin_opus.a`). Links statically with the target application binary during the Solar2D cloud build process.
-  * **Windows Simulator:** Full native C++ implementation (`plugin_opus.dll`) compiled with the Opus 1.6.1 codec to enable full encoding/decoding capabilities on Windows desktop.
+  * **Android:** Packaged as a Java JAR wrapping a compiled JNI native dynamic library (`.so`) for `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64` architectures.
+  * **iOS / iOS Simulator:** Distributed as a static library (`libplugin_opus.a`), linked statically into the application when Solar2D builds it.
+  * **Windows Simulator:** Full native C++ implementation (`plugin_opus.dll`, 32-bit) compiled with the Opus 1.6.1 codec to enable full encoding/decoding capabilities on Windows desktop.
   * **macOS Simulator & Desktop:** Full native C++ implementation (`plugin_opus.dylib`) compiled with the Opus 1.6.1 codec as a universal binary (`arm64` and `x86_64`) to enable full native encoding/decoding, resampling, and volume normalization.
-  * **Linux Simulator:** Pure Lua stub implementation (`plugin_opus.lua`) to prevent simulator crashes and support clean UI flow testing.
+  * **Linux Simulator:** Pure Lua stub (`plugin_opus.lua`) that keeps projects running and lets the UI flow be tested: every function exists and prints a warning, but nothing is encoded — `encode` and `decode` return empty strings, `resample` and `normalize` return the input unchanged.
 
 * **Statically Linked Codec**
-  For Android, iOS, and Windows, instead of using a separate C/C++ library, the Opus codec is statically compiled and linked directly into the native wrapper library. This enables compiler/linker dead-code stripping, reducing the final binary footprint under 1MB (e.g. ~459KB for iOS device, ~680KB for Android arm64-v8a, and ~302KB for Windows Simulator DLL).
+  On Android, iOS, macOS and Windows, instead of using a separate C/C++ library, the Opus codec is statically compiled and linked directly into the native wrapper library. This enables compiler/linker dead-code stripping, keeping each binary under 1MB (e.g. ~478KB for iOS device, ~674KB for Android arm64-v8a, ~302KB for the Windows Simulator DLL).
 
-* **Fixed-Point Math Compilation**
-  Compiled with the `OPUS_FIXED_POINT=ON` flag. This configures the entire Opus codec to use integer-based, fixed-point calculations instead of floating-point math. This is optimal for mobile processors (ARM) and desktop simulators, resulting in significantly reduced CPU overhead.
+* **Fixed-Point Math on Android and Windows**
+  On Android (`OPUS_FIXED_POINT=ON`) and in the Windows Simulator (`FIXED_POINT`), the Opus codec is compiled with integer-based, fixed-point calculations instead of floating-point math, which keeps the CPU cost low on any device. The iOS and macOS builds use Opus' default floating-point configuration (`opus_config/config.h`).
 
 * **Native Volume Normalizer (Android, iOS, macOS & Windows Simulator)**
-  On Android, iOS, macOS, and Windows Simulator, the plugin includes a built-in volume peak normalizer running directly in the native C++ layer. It scans the PCM input, calculates the peak amplitude, and applies a scaling factor up to the target ratio (e.g., 95% peak volume) in a single pass. This boosts quiet recordings from low-end microphones without digital clipping. (Bypassed on Linux as `opus.normalize` is nil).
+  The plugin includes a peak normalizer running directly in the native C++ layer. It scans the PCM input for the peak amplitude and scales all samples so that the peak becomes the target ratio of full scale (e.g., 95%): quiet recordings from low-end microphones are boosted without digital clipping, louder ones are brought down to the same level. Silent input is returned unchanged. (On Linux the stub returns the input unchanged.)
 
 * **Native Linear Resampler (Android, iOS, macOS & Windows Simulator)**
-  On Android, iOS, macOS, and Windows Simulator, the plugin includes a native resampler written in C++. Since mobile and desktop devices might record audio at various hardware sample rates (e.g. 44100 Hz), while Opus strictly requires specific target sample rates (8000, 12000, 16000, 24000, or 48000 Hz), the resampler bridges this difference directly in C++. (Bypassed on Linux as `opus.resample` is nil).
+  The plugin includes a native linear-interpolation resampler written in C++. Since mobile and desktop devices might record audio at various hardware sample rates (e.g. 44100 Hz), while Opus strictly requires specific sample rates (8000, 12000, 16000, 24000, or 48000 Hz), the resampler bridges this difference directly in C++. (On Linux the stub returns the input unchanged.)
 
 ---
 
@@ -47,22 +47,24 @@ local opus = require "plugin.opus"
 Creates and returns a native Opus encoder instance.
 * **sampleRate:** Number (Supported: 8000, 12000, 16000, 24000, 48000 Hz)
 * **channels:** Number (1 = Mono, 2 = Stereo)
-* **application:** Number (2048 = VOIP, 2049 = Audio/Music, 2051 = Low Delay)
-* **Returns:** Encoder object, or `(nil, error_message)`
+* **application:** Number (2048 = VOIP, 2049 = Audio/Music, 2051 = Low Delay). Required on Android; on iOS, macOS and Windows it defaults to 2049 when omitted.
+* **Returns:** Encoder object, or `(nil, error_message)`. On iOS and macOS an unsupported sample rate or channel count raises a Lua error instead.
 
 #### Encoder Methods:
 * **`encoder:encode(pcmBytesString, frameSize)`**
   Compresses a frame of 16-bit PCM samples.
   * `pcmBytesString`: String containing raw 16-bit PCM bytes (Little-Endian).
-  * `frameSize`: Number of samples per channel (e.g., `sampleRate * 0.02` for 20ms).
-  * **Returns:** Compressed Opus packet (binary string), or `nil`.
+  * `frameSize`: Number of samples per channel — a valid Opus frame duration: 2.5, 5, 10, 20, 40 or 60 ms (e.g., `sampleRate * 0.02` for 20ms).
+  * **Returns:** Compressed Opus packet (binary string). On failure: `nil` (with an error message on iOS, macOS and Windows).
 * **`encoder:set_dtx(useDtx)`**
   Enables/disables Discontinuous Transmission (VAD/DTX codec-level silence).
   * `useDtx`: Boolean
-  * **Returns:** Status code (0 on success).
-* **`encoder:destroy()`**
-  Destroys the encoder and frees its native memory pool.
-  * *Note:* Optional on iOS (cleanup is handled automatically by Lua's Garbage Collector). Explicitly releases resources on Android and Windows.
+  * **Returns:** Status code (0 on success) on Android and Windows; nothing on iOS and macOS.
+* **`encoder:set_bitrate(bitsPerSecond)`**, **`encoder:set_complexity(0..10)`**, **`encoder:set_vbr(useVbr)`** — iOS, macOS & Windows Simulator only (not available on Android).
+  Set the target bitrate, the encoder complexity and variable bitrate. Windows returns the Opus status code; iOS and macOS return nothing.
+* **`encoder:destroy()`** — Android, Windows Simulator (and the Linux stub).
+  Destroys the encoder and frees its native memory.
+  * *Note:* On Android the encoder is a Lua table, and Solar2D's Lua 5.1 does not run `__gc` for tables, so native memory is freed **only** by `destroy()`. On iOS and macOS the encoder is userdata freed by the garbage collector, and there is no `destroy` method. Portable code: `if encoder.destroy then encoder:destroy() end`.
 
 ### `opus.decoder_create(sampleRate, channels)`
 Creates and returns a native Opus decoder instance.
@@ -74,11 +76,10 @@ Creates and returns a native Opus decoder instance.
 * **`decoder:decode(packetBytesString, frameSize)`**
   Decompresses an Opus packet back to raw 16-bit PCM bytes.
   * `packetBytesString`: String containing the compressed Opus packet.
-  * `frameSize`: Number of samples per channel to decode.
-  * **Returns:** Decoded raw PCM bytes (binary string), or `nil`.
-* **`decoder:destroy()`**
-  Destroys the decoder and frees its native memory pool.
-  * *Note:* Optional on iOS (cleanup is handled automatically by Lua's Garbage Collector). Explicitly releases resources on Android and Windows.
+  * `frameSize`: Maximum number of samples per channel to decode.
+  * **Returns:** Decoded raw PCM bytes (binary string). On failure: `nil` (with an error message on iOS, macOS and Windows).
+* **`decoder:destroy()`** — Android, Windows Simulator (and the Linux stub).
+  Destroys the decoder and frees its native memory. Same rules as `encoder:destroy()`: required on Android, absent on iOS and macOS (garbage-collected).
 
 ### `opus.resample(pcmBytesString, fromRate, toRate, channels)` [Android, iOS, macOS & Windows Simulator]
 Natively resamples raw PCM bytes from one sample rate to another.
@@ -86,15 +87,15 @@ Natively resamples raw PCM bytes from one sample rate to another.
 * **fromRate:** Source frequency in Hz.
 * **toRate:** Target frequency in Hz.
 * **channels:** Number of channels.
-* **Returns:** Resampled PCM bytes (binary string).
-* *Note:* This function is `nil` on Linux simulator.
+* **Returns:** Resampled PCM bytes (binary string), linearly interpolated.
+* *Note:* On the Linux simulator the stub returns the input unchanged.
 
 ### `opus.normalize(pcmBytesString, targetRatio)` [Android, iOS, macOS & Windows Simulator]
-Natively boosts the peak volume level of the audio.
+Natively scales the audio so that its peak reaches the target level.
 * **pcmBytesString:** Raw 16-bit PCM bytes.
-* **targetRatio:** Target peak amplitude ratio (e.g., 0.95 for 95% maximum volume).
-* **Returns:** Normalized PCM bytes (binary string).
-* *Note:* This function is `nil` on Linux simulator.
+* **targetRatio:** Target peak amplitude ratio (e.g., 0.95 for 95% maximum volume). Quiet audio is boosted, louder audio is attenuated.
+* **Returns:** Normalized PCM bytes (binary string); silent input is returned unchanged.
+* *Note:* On the Linux simulator the stub returns the input unchanged.
 
 ---
 
@@ -114,7 +115,7 @@ For a standard voice message recording/playback feature:
 7. Package the resulting packets together with the WAV/AIFF metadata.
 8. **To play back:** Instantiate a decoder, decode the packets frame-by-frame (always to WAV format for cross-platform compatibility), resample back to original rate if needed, rebuild the audio file header, and write back.
 
-*(See `pub/SimpleAudioRecorder` for a fully implemented Lua file-based helper class wrapping this logic).*
+*(See `SimpleAudioRecorder` for a fully implemented Lua file-based helper class wrapping this logic).*
 
 ---
 
@@ -144,10 +145,92 @@ settings =
 
 ### Windows C++ Redistributable Dependency
 
-The Windows Simulator plugin (`plugin_opus.dll`) has an implicit dependency on the Microsoft Visual C++ Runtime libraries. Without these libraries installed in the host OS, Solar2D Simulator will fail to load the plugin at runtime, causing build/simulation errors.
+The Windows Simulator plugin (`plugin_opus.dll`) is linked against the Microsoft Visual C++ Runtime DLLs (`VCRUNTIME140.dll`, `MSVCP140.dll`). Without these libraries installed in the host OS, Solar2D Simulator will fail to load the plugin at runtime, causing build/simulation errors.
 
 To check and automatically install the required C++ dependencies on Windows, run the provided setup scripts:
 * PowerShell Script: [setup_dependencies.ps1](setup_dependencies.ps1)
 * Batch Script: [setup_dependencies.bat](setup_dependencies.bat)
 
 Simply run `setup_dependencies.bat` to ensure your system has all required C++ runtime libraries.
+
+---
+
+## 6. Source Code & Building
+
+The precompiled archives in `plugins_tgz/` (and the older directory layout in `plugin.opus/`) are built from the sources in this repository:
+
+| Directory | Contents |
+| :--- | :--- |
+| `android/` | Solar2D Native Android project. The plugin module is `android/plugin`: Java loader `src/main/java/plugin/opus/LuaLoader.java`, JNI wrapper `src/main/cpp/plugin_opus.cpp` and `CMakeLists.txt` that builds Opus (fixed-point, no intrinsics) for all four ABIs. `android/app` is the test application: by default it packs the `SimpleAudioRecorder` demo (`coronaSrcDir` in `android/gradle.properties`); `./gradlew :app:assembleDebug -PcoronaSrcDir=../../Corona` packs the test suite instead. |
+| `ios/` | Xcode projects for iOS: `Plugin/PluginLibrary.mm` (the plugin), `build_opus.sh` (static Opus for device and simulator), `build.sh` (produces `BuiltPlugin/iphone` and `BuiltPlugin/iphone-sim`; it also runs `build_mac.sh`, an older standalone macOS build — the published macOS plugin comes from `mac/`), `App.xcodeproj` (test application with the `Corona/` test suite). |
+| `mac/` | Xcode project for the macOS Simulator plugin (`plugin_opus.dylib`, universal `arm64` + `x86_64`), built from `shared/SimulatorPluginLibrary.cpp`; `build_opus_mac.sh` builds Opus for macOS. |
+| `shared/` | C++ implementation shared by the macOS Simulator build. |
+| `win32/` | Visual Studio project for the Windows Simulator plugin (`plugin_opus.dll`, 32-bit): `plugin_opus.cpp`, with Opus compiled in. |
+| `Corona/` | Cross-platform test suite: `main.lua` encodes and decodes 200 ms of a sine wave, checks the level after the codec, the resampler and the normalizer, and prints PASS/FAIL. Used by the iOS test application and, with `-PcoronaSrcDir`, by the Android one. |
+| `SimpleAudioRecorder/` | Demo application: records a voice message, encodes it to Opus and plays it back (`opus.lua` — a reusable file-based helper). |
+| `opus_config/` | `config.h` for the iOS/macOS builds of Opus (produced by Opus' `./configure`; they compile Opus with `-DHAVE_CONFIG_H`) and `COPYING` — the Opus license. |
+| `tools/` | `poluchit_opus.py` downloads the Opus sources; `sobrat_android_tgz.py` packs `plugins_tgz/android.tgz`. |
+
+### Opus sources
+
+The Opus codec itself is not stored in this repository. All builds expect the **Opus 1.6.1** sources in `opus-1.6.1/` at the repository root:
+
+* Project and repository: [opus-codec.org](https://opus-codec.org), [github.com/xiph/opus](https://github.com/xiph/opus) (tag `v1.6.1`).
+* Release archive used for the published binaries: [opus-1.6.1.tar.gz](https://downloads.xiph.org/releases/opus/opus-1.6.1.tar.gz), SHA-256 `6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1` (see [SHA256SUMS.txt](https://downloads.xiph.org/releases/opus/SHA256SUMS.txt)).
+
+To download, verify and unpack it:
+
+```
+python tools/poluchit_opus.py
+```
+
+Only `src/`, `celt/` and `silk/` are compiled — the neural (`dnn/`) features are not used. Every build stops with a message pointing to the script if `opus-1.6.1/` is missing.
+
+### Android
+
+Requirements: JDK 17, Android SDK with NDK, Solar2D Native (`CORONA_ROOT`).
+
+```
+cd android
+./gradlew :plugin:assembleRelease
+cd ..
+python tools/sobrat_android_tgz.py
+```
+
+`assembleRelease` produces `android/plugin/build/outputs/aar/plugin-release.aar`. `sobrat_android_tgz.py` turns it into `plugins_tgz/android.tgz`: `plugin.opus.jar` (the classes plus `lib/<abi>/libplugin_opus.so` for all four ABIs), `metadata.lua` and `resources/package.txt` from `plugin.opus/android/`. For testing with a local Solar2D build, `./gradlew :plugin:deployToLocalSolar2DRepo` puts the AAR into the local `Solar2DPlugins` directory.
+
+### iOS and iOS Simulator
+
+Requirements: macOS with Xcode and Solar2D Native (`~/Library/Application Support/Corona/Native`).
+
+```
+ios/build.sh
+```
+
+The result is `ios/BuiltPlugin/iphone` and `ios/BuiltPlugin/iphone-sim` (`libplugin_opus.a` with Opus merged in, and `metadata.lua`). `ios/deployLocal.sh` packs them into the local `Solar2DPlugins` directory.
+
+### macOS Simulator
+
+```
+mac/build.sh
+```
+
+Builds Opus (`build_opus_mac.sh`), then the Xcode project, strips local symbols and re-signs `plugin_opus.dylib`.
+
+### Windows Simulator
+
+Requirements: Visual Studio 2022 with C++ desktop tools, Solar2D for Windows; the environment variable `CORONA_ROOT` points to its `Native` directory (for example `C:\Program Files (x86)\Corona Labs\Corona\Native`).
+
+```
+msbuild win32\Plugin.vcxproj /p:Configuration=Release /p:Platform=Win32
+```
+
+The result is `win32\Release\plugin_opus.dll`; a post-build step copies it into the Solar2D Simulator plugin directory.
+
+---
+
+## 7. License
+
+The plugin code is released under the MIT License — see [LICENSE](LICENSE).
+
+The Opus codec, statically linked into all plugin binaries (and the generated `opus_config/config.h`), is © the Xiph.Org Foundation and contributors and is distributed under the BSD 3-Clause license — see [opus_config/COPYING](opus_config/COPYING).

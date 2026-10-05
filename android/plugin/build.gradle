@@ -1,0 +1,79 @@
+apply plugin: 'com.android.library'
+
+android {
+    compileSdk 35
+    defaultConfig {
+        namespace "plugin.opus" // This is the package name of the plugin
+
+        minSdkVersion 21
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+        }
+    }
+
+}
+
+dependencies {
+    implementation ':Corona@aar'
+}
+
+def buildDirectory = getLayout().getBuildDirectory().asFile.get()
+tasks.register("extractPluginJar") {
+    group "Solar2Dev"
+    dependsOn assembleRelease
+    doLast {
+        copy {
+            from {
+                zipTree("$buildDirectory/outputs/aar/${project.name}-release.aar").matching {
+                    include 'classes.jar'
+                }.singleFile
+            }
+            into "$buildDirectory/outputs/"
+            String packageName = android.namespace
+            rename "classes.jar", "${packageName}.jar"
+        }
+    }
+}
+
+// This creates archive for plugin so it can be used by Simulator from build.settings
+// by deploying it directly to Solar2DPlugins directory. This is first in line location
+// to retrieve plugins, so will overshadow online directory/store downloads.
+// Must match publisherId of this plugin in the app's build.settings, otherwise
+// the Simulator looks for the local copy under the wrong provider directory.
+def providerId = 'ovh.azi'
+tasks.register("deployToLocalSolar2DRepo", Tar) {
+    group "Solar2Dev"
+
+    dependsOn assembleRelease
+
+    File pluginManifestFile = file("src/main/AndroidManifest.xml")
+    String manifestContents = pluginManifestFile.text
+    def pluginManifestXml = new XmlSlurper().parseText(manifestContents)
+    String packageName = android.namespace
+
+    compression = Compression.GZIP
+    archiveFileName = "data.tgz"
+    def rootS2DP
+    if (System.getenv("APPDATA")) {
+        rootS2DP = System.getenv("APPDATA")
+    } else {
+        rootS2DP = System.getenv("HOME") ?: System.getProperty("user.home")
+    }
+    def dst = file("$rootS2DP/Solar2DPlugins/$providerId/$packageName/android")
+    destinationDirectory = dst
+
+    into("/") {
+        from("$buildDirectory/outputs/aar")
+        include("${project.name}-release.aar")
+    }
+    doLast {
+        println("\n\n\n== !!! IMPORTANT !!! ==\nMake sure to delete plugin when done: $dst\nThis plugin will override any Solar2Directory plugin, or plugin from any other source")
+    }
+}

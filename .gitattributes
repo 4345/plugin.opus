@@ -1,0 +1,10 @@
+# Двоичные файлы: без преобразований и текстовых диффов.
+*.dll    binary
+*.lib    binary
+*.dylib  binary
+*.so     binary
+*.a      binary
+*.jar    binary
+*.tgz    binary
+*.png    binary
+*.nib    binary

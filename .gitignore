@@ -1,1 +1,24 @@
 .DS_Store
+
+# Вывод сборки и локальные файлы сред разработки — в репозитории только исходники
+build/
+BuiltPlugin/
+.gradle/
+.cxx/
+.externalNativeBuild/
+local.properties
+.idea/
+.vs/
+xcuserdata/
+DerivedData/
+*.user
+win32/Debug/
+win32/Release/
+win32/Plugin/
+mac/libopus.a
+mac/plugin_opus.dylib
+
+# Исходники Opus в репозитории не хранятся — их скачивает tools/poluchit_opus.py
+opus-1.6.1/
+*.o
+*.lo
