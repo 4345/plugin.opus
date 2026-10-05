@@ -1,3 +1,8 @@
+# Скрипты оболочки — всегда с LF, и в рабочей копии на Windows тоже: папку
+# переносят на Mac копированием, а с CRLF bash падает на «bad interpreter».
+*.sh     text eol=lf
+gradlew  text eol=lf
+
 # Двоичные файлы: без преобразований и текстовых диффов.
 *.dll    binary
 *.lib    binary

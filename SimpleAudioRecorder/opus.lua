@@ -1,32 +1,51 @@
 -- opus.lua
--- Reusable Solar2D module for Opus-1.6.1 transcoding (WAV and AIFF files)
+-- Reusable Solar2D module for Opus 1.6.1 transcoding (WAV and AIFF files)
 --
 -- ==============================================================================
--- PLUGIN DETAILS & PLATFORM CAPABILITIES:
+-- WHAT THE MODULE DOES:
 -- ==============================================================================
--- * Codec version: Opus 1.6.1 (published as plugin.opus)
--- * Fixed-Point Math: Compiled with OPUS_FIXED_POINT=ON for high performance and
---   low power consumption on mobile CPUs (Android & iOS).
+-- * encodeFile: reads a WAV or AIFF recording, picks the nearest sample rate
+--   that Opus supports (8000, 12000, 16000, 24000 or 48000 Hz), resamples the
+--   PCM to it with opus.resample, normalizes the peak to 95% of full scale with
+--   opus.normalize, encodes 20 ms frames and writes them into a simple .opus
+--   package together with the original file header.
+-- * decodeFile: decodes the package frame by frame, resamples back to the
+--   original rate and rebuilds the WAV/AIFF file.
+-- * The same code runs on every platform: resample and normalize are used when
+--   the plugin provides them, and destroy() is called only where it exists.
 --
--- [Android Target]
--- * Format: Java JAR wrapping a compiled JNI native dynamic library (.so).
--- * Static Linkage: Links libopus.a statically into the JNI library to enable
---   dead-code stripping, minimizing the plugin package footprint.
--- * Native Volume Normalizer: Includes a custom JNI peak normalizer to boost
---   audio levels (target peak 95%) without introducing digital clipping.
--- * Native JNI Resampler: Fast linear resampler to bridge Android's fixed
---   44100 Hz recording rate to standard Opus-supported rates (8kHz to 48kHz).
+-- ==============================================================================
+-- PLUGIN DETAILS & PLATFORM CAPABILITIES (see README.md of plugin.opus):
+-- ==============================================================================
+-- * Codec: Opus 1.6.1, statically linked into the plugin on every native
+--   platform. Native encoder, decoder, linear resampler and peak normalizer on
+--   Android, iOS / iOS Simulator, macOS Simulator and Windows Simulator.
+-- * Math: fixed-point on Android and the Windows Simulator, floating-point on
+--   iOS and macOS.
 --
--- [iOS / iOS Simulator Targets]
--- * Format: Universal static library (libplugin_opus.a) linked at cloud build time.
--- * Static Linkage: Fully statically linked with native dead-code stripping,
---   keeping the device static library size down to ~459 KB.
--- * Recording & Rates: Bypasses native resampling/normalizing. On iOS, Solar2D
---   records audio directly at the requested target rate (e.g. 16000 Hz), which
---   is natively supported by the Opus codec.
+-- [Android]
+-- * Java JAR with the JNI library libplugin_opus.so (armeabi-v7a, arm64-v8a,
+--   x86, x86_64).
+-- * Encoder and decoder are Lua tables: Lua 5.1 does not run __gc for tables,
+--   so their native memory is freed only by destroy().
+-- * set_bitrate / set_complexity / set_vbr are not available.
 --
--- [Desktop Simulator Targets (macOS, Windows, Linux)]
--- * Format: Pure Lua stubs to prevent simulator crashes and support clean UI testing.
+-- [iOS / iOS Simulator]
+-- * Static library libplugin_opus.a (~478 KB for devices), linked into the
+--   application when Solar2D builds it.
+-- * Encoder and decoder are userdata freed by the garbage collector; there is
+--   no destroy().
+--
+-- [macOS Simulator]
+-- * Universal plugin_opus.dylib (arm64 + x86_64); same API as iOS.
+--
+-- [Windows Simulator]
+-- * 32-bit plugin_opus.dll; needs the Visual C++ runtime (setup_dependencies.bat).
+--
+-- [Linux Simulator]
+-- * Lua stub: every function exists and prints a warning, but nothing is
+--   encoded (encode/decode return empty strings, resample/normalize return the
+--   input unchanged).
 -- ==============================================================================
 -- API USAGE EXAMPLE:
 -- ==============================================================================

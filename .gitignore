@@ -22,3 +22,7 @@ mac/plugin_opus.dylib
 opus-1.6.1/
 *.o
 *.lo
+
+# Задание агенту на Mac и его отчёт: в них данные машины и устройств
+ZADANIE_DLYA_MAC.md
+OTCHET_MAC.md
