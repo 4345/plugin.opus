@@ -17,7 +17,7 @@ The Solar2D Opus Plugin is a high-performance, lightweight native audio codec pl
   * **Android:** Packaged as a Java JAR wrapping a compiled JNI native dynamic library (`.so`) for `armeabi-v7a`, `arm64-v8a`, `x86` and `x86_64` architectures.
   * **iOS / iOS Simulator:** Distributed as a static library (`libplugin_opus.a`), linked statically into the application when Solar2D builds it.
   * **Windows Simulator:** Full native C++ implementation (`plugin_opus.dll`, 32-bit) compiled with the Opus 1.6.1 codec to enable full encoding/decoding capabilities on Windows desktop.
-  * **macOS Simulator & Desktop:** Full native C++ implementation (`plugin_opus.dylib`) compiled with the Opus 1.6.1 codec as a universal binary (`arm64` and `x86_64`) to enable full native encoding/decoding, resampling, and volume normalization.
+  * **macOS Simulator:** Full native C++ implementation (`plugin_opus.dylib`) compiled with the Opus 1.6.1 codec as a universal binary (`arm64` and `x86_64`) to enable full native encoding/decoding, resampling, and volume normalization.
   * **Linux Simulator:** Pure Lua stub (`plugin_opus.lua`) that keeps projects running and lets the UI flow be tested: every function exists and prints a warning, but nothing is encoded — `encode` and `decode` return empty strings, `resample` and `normalize` return the input unchanged.
 
 * **Statically Linked Codec**
@@ -135,13 +135,15 @@ settings =
                 android = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/android.tgz" },
                 iphone = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/iphone.tgz" },
                 ["iphone-sim"] = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/iphone-sim.tgz" },
-                macosx = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/macosx.tgz" },
+                ["mac-sim"] = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/macosx.tgz" },
                 ["win32-sim"] = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/win32-sim.tgz" }
             }
         },
     },
 }
 ```
+
+The macOS archive is named `macosx.tgz`, but the Solar2D Simulator on a Mac only picks it up under the `["mac-sim"]` key — with a `macosx` key nothing is downloaded and `require "plugin.opus"` fails.
 
 ### Windows C++ Redistributable Dependency
 
@@ -201,13 +203,15 @@ python tools/sobrat_android_tgz.py
 
 ### iOS and iOS Simulator
 
-Requirements: macOS with Xcode and Solar2D Native (`~/Library/Application Support/Corona/Native`).
+Requirements: macOS with Xcode and Solar2D Native (`~/Library/Application Support/Corona/Native`). Verified with Xcode 27, which accepts deployment targets from iOS 15.0 and macOS 12.0 — the projects use exactly these minimums.
 
 ```
 ios/build.sh
 ```
 
 The result is `ios/BuiltPlugin/iphone` and `ios/BuiltPlugin/iphone-sim` (`libplugin_opus.a` with Opus merged in, and `metadata.lua`). `ios/deployLocal.sh` packs them into the local `Solar2DPlugins` directory.
+
+The test application `ios/App.xcodeproj` links the plugin target (`libplugin_library.a`, without Opus) and the Opus library from `ios/build/opus_build/`, so run `ios/build.sh` (or `ios/build_opus.sh`) before building `App`. Build the `Download Plugins` target first, then `App`.
 
 ### macOS Simulator
 

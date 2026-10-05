@@ -20,7 +20,7 @@ settings =
 				android = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/android.tgz" },
 				iphone = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/iphone.tgz" },
 				["iphone-sim"] = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/iphone-sim.tgz" },
-				macosx = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/macosx.tgz" },
+				["mac-sim"] = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/macosx.tgz" },
 				["win32-sim"] = { url = "https://raw.githubusercontent.com/4345/plugin.opus/main/plugins_tgz/win32-sim.tgz" }
 			}
 		},
